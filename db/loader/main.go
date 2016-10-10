@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/danielfireman/deciframe-api/db"
@@ -27,7 +28,7 @@ const (
 )
 
 func main() {
-	mongoDB, err := db.New(os.Getenv("MONGODB_URI"))
+	mongoDB, err := db.Mongo(os.Getenv("MONGODB_URI"))
 	if err != nil {
 		log.Fatalf("Ocorreu um erro no parse da MONGODB_URI. err:'%q'\n", err)
 	}
@@ -41,7 +42,7 @@ func main() {
 		linha = strings.Replace(linha, "\"", "", -1)
 		linha = strings.Replace(linha, "NA", "", -1)
 		dados := strings.Split(linha, ",")
-		musicas = append(musicas, &db.M{
+		m := &db.M{
 			IDUnicoMusica: db.IDUnicoMusica(dados[ARTISTA_ID], dados[MUSICA_ID]),
 			Artista:       dados[ARTISTA],
 			IDArtista:     dados[ARTISTA_ID],
@@ -49,13 +50,27 @@ func main() {
 			Nome:          dados[MUSICA],
 			Genero:        dados[GENERO],
 			Tom:           dados[TOM],
-			SeqFamosas:    strings.Split(dados[SEQ_FAMOSA], ";"),
-			Acordes:       acordes(dados[CIFRA]),
-		})
+		}
+
+		m.Popularidade, err = strconv.Atoi(strings.Replace(dados[POPULARIDADE], ".", "", -1))
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		seqFTrim := strings.Trim(dados[SEQ_FAMOSA], " ")
+		if seqFTrim != "" && seqFTrim != "NA" {
+			m.SeqFamosas = strings.Split(seqFTrim, ";")
+		}
+
+		// Tratando acordes como um campo obrigatório. Não adicionando se não tiver acordes.
+		a := acordes(dados[CIFRA])
+		if len(a) > 0 {
+			m.Acordes = a
+			musicas = append(musicas, m)
+		}
 	}
 
 	fmt.Printf("Inserindo %d músicas. \n", len(musicas))
-
 	c := mongoDB.GetColecaoMusicas()
 	if err := c.EnsureIndex(mgo.Index{
 		Key:        []string{"genero"},
@@ -87,6 +102,16 @@ func main() {
 		log.Fatalf("Erro criando índice de id_unico_musica: %q", err)
 	}
 	fmt.Println("Índice de id_unico_musica criado com sucesso.")
+	if err = c.EnsureIndex(mgo.Index{
+		Key:        []string{"seq_famosas"},
+		Unique:     false,
+		DropDups:   false,
+		Background: false,
+		Sparse:     true,
+	}); err != nil {
+		log.Fatalf("Erro criando índice de seq_famosas: %q", err)
+	}
+	fmt.Println("Índice de seq_famosas criado com sucesso.")
 	if err := c.Insert(musicas...); err != nil {
 		log.Fatalf("Erro inserindo músicas: %q", err)
 	}

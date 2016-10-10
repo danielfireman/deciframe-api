@@ -19,7 +19,7 @@ import (
 	"github.com/newrelic/go-agent"
 )
 
-type SimilaresResponse struct {
+type SimilaresResposta struct {
 	UniqueID     string        `json:"id_unico_musica"`
 	IDArtista    string        `json:"id_artista"`
 	ID           string        `json:"id_musica"`
@@ -29,12 +29,12 @@ type SimilaresResponse struct {
 	Acordes      []string      `json:"acordes"`
 	Genero       string        `json:"genero"`
 	URL          string        `json:"url"`
-	Diferenca    []interface{} `json:"diferenca"`
-	Intersecao   []interface{} `json:"intersecao"`
+	Diferenca    []interface{} `json:"diferenca,omitempty"`
+	Intersecao   []interface{} `json:"intersecao,omitempty"`
 }
 
 // PorMenorDiferenca implementa sort.Interface for []*Musica baseado no campo Diferenca
-type PorMenorDiferenca []*SimilaresResponse
+type PorMenorDiferenca []*SimilaresResposta
 
 func (p PorMenorDiferenca) Len() int {
 	return len(p)
@@ -60,11 +60,20 @@ type HandlerFactory struct {
 
 func FabricaDeTratadores(db *db.DB, cache *cache.Codec, mon newrelic.Application) *HandlerFactory {
 	return &HandlerFactory{
-		mon:  mon,
-		db:   db,
-		fila: make(chan struct{}, NUM_ACESSOS_CONCORRENTES),
+		mon:   mon,
+		db:    db,
+		fila:  make(chan struct{}, NUM_ACESSOS_CONCORRENTES),
 		cache: cache,
 	}
+}
+
+var sequencias = map[string][]string{
+	"BmGDA":   []string{"0"},
+	"CGAmF":   []string{"1"},
+	"EmG":     []string{"2"},
+	"CA7DmG7": []string{"3"},
+	"GmF":     []string{"4"},
+	"CC7FFm":  []string{"5"},
 }
 
 func (s *HandlerFactory) GetHandler() httprouter.Handle {
@@ -86,7 +95,8 @@ func (s *HandlerFactory) GetHandler() httprouter.Handle {
 			return
 		}
 
-		/*response := s.buscaNoCache(r.URL.RawQuery, txn)
+		// Busca no cache.
+		response := s.buscaNoCache(r.URL.RawQuery, txn)
 		if len(response) > 0 {
 			b, err := marshal(response, pagina, txn)
 			if err != nil {
@@ -97,11 +107,50 @@ func (s *HandlerFactory) GetHandler() httprouter.Handle {
 			txn.Header().Add("Access-Control-Allow-Origin", "*")
 			fmt.Fprintf(txn, b)
 			return
-		}*/
+		}
 
-		var response []*SimilaresResponse
-		var acordes []string
+		// Busca sequência famosa.
 		queryValues := r.URL.Query()
+		if queryValues.Get("sequencia") != "" {
+			acordes := strings.Replace(queryValues.Get("sequencia"), ",", "", -1)
+			var response []*SimilaresResposta
+			idSeq, ok := sequencias[acordes]
+			if ok {
+				buscaSeqFamosas := newrelic.StartSegment(txn, "busca_seq_famosas")
+				musicasSeqFamosa, err := s.db.BuscaMusicasPorSeqFamosa(idSeq, generosRequisitados(r))
+				if err != nil {
+					log.Printf("Erro processando request [%s]: '%q'\n", r.URL.String(), err)
+					txn.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				buscaSeqFamosas.End()
+				for _, m := range musicasSeqFamosa {
+					response = append(response, &SimilaresResposta{
+						UniqueID:     m.UniqueID,
+						IDArtista:    m.IDArtista,
+						ID:           m.ID,
+						Artista:      m.Artista,
+						Nome:         m.Nome,
+						Popularidade: m.Popularidade,
+						Acordes:      m.Acordes,
+						Genero:       m.Genero,
+						URL:          m.URL,
+					})
+				}
+				b, err := s.toBytes(r.URL.RawQuery, response, pagina)
+				if err != nil {
+					log.Printf("Erro processando request [%s]: '%q'\n", r.URL.String(), err)
+					txn.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				txn.Header().Add("Access-Control-Allow-Origin", "*")
+				fmt.Fprintf(txn, string(b))
+				return
+			}
+		}
+
+		// Busca similares: por acordes ou por id_unico_musica.
+		var acordes []string
 		switch {
 		case queryValues.Get("acordes") != "":
 			acordes = strings.Split(queryValues.Get("acordes"), ",")
@@ -122,7 +171,12 @@ func (s *HandlerFactory) GetHandler() httprouter.Handle {
 			}
 		}
 		buscaSimilares := newrelic.StartSegment(txn, "busca_similares")
-		musicasSimilares, err := s.db.BuscaMusicas(acordes, generosRequisitados(r))
+		musicasSimilares, err := s.db.BuscaMusicasPorAcordes(acordes, generosRequisitados(r))
+		if err != nil {
+			log.Printf("Erro processando request [%s]: '%q'\n", r.URL.String(), err)
+			txn.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		buscaSimilares.End()
 
 		acordesSet := sets.NewThreadUnsafeSet()
@@ -135,7 +189,7 @@ func (s *HandlerFactory) GetHandler() httprouter.Handle {
 				mAcordesSet.Add(a)
 			}
 			if mAcordesSet.Cardinality() > 1 && queryValues.Get("id_unico_musica") != m.UniqueID {
-				response = append(response, &SimilaresResponse{
+				response = append(response, &SimilaresResposta{
 					UniqueID:     m.UniqueID,
 					IDArtista:    m.IDArtista,
 					ID:           m.ID,
@@ -150,9 +204,10 @@ func (s *HandlerFactory) GetHandler() httprouter.Handle {
 				})
 			}
 		}
+		sort.Sort(PorMenorDiferenca(response))
 		b, err := s.toBytes(r.URL.RawQuery, response, pagina)
 		if err != nil {
-			log.Printf("Erro processando request [%s]: '%q'", r.URL.String(), err)
+			log.Printf("Erro processando request [%s]: '%q'\n", r.URL.String(), err)
 			txn.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -161,21 +216,18 @@ func (s *HandlerFactory) GetHandler() httprouter.Handle {
 	}
 }
 
-func (s *HandlerFactory) buscaNoCache(query string, txn newrelic.Transaction) []*SimilaresResponse {
+func (s *HandlerFactory) buscaNoCache(query string, txn newrelic.Transaction) []*SimilaresResposta {
 	defer newrelic.StartSegment(txn, "busca_cache").End()
-	var response []*SimilaresResponse
+	var response []*SimilaresResposta
 	if err := s.cache.Get(query, &response); err != nil && err != cache.ErrCacheMiss {
 		log.Printf("Erro buscando no cache: %q", err)
-		return []*SimilaresResponse{} // Garantir que mandamos uma lista vazia.
+		return []*SimilaresResposta{} // Garantir que mandamos uma lista vazia.
 	}
 	return response
 }
 
-func marshal(response []*SimilaresResponse, pagina int, txn newrelic.Transaction) (string, error) {
+func marshal(response []*SimilaresResposta, pagina int, txn newrelic.Transaction) (string, error) {
 	defer newrelic.StartSegment(txn, "marshal").End()
-
-	// Para retornar, primeiro ordenamos
-	sort.Sort(PorMenorDiferenca(response))
 
 	// Consideramos os limites da página.
 	i, f := limitesDaPagina(len(response), pagina)
@@ -188,15 +240,12 @@ func marshal(response []*SimilaresResponse, pagina int, txn newrelic.Transaction
 	return string(b), nil
 }
 
-func (s *HandlerFactory) toBytes(cacheKey string, response []*SimilaresResponse, pagina int) ([]byte, error) {
-	// Para retornar, primeiro ordenamos
-	sort.Sort(PorMenorDiferenca(response))
-
+func (s *HandlerFactory) toBytes(cacheKey string, response []*SimilaresResposta, pagina int) ([]byte, error) {
 	// Consideramos os limites da página.
 	i, f := limitesDaPagina(len(response), pagina)
 
+	// Colocamos no cache.
 	if len(response) > 0 {
-		// Colocamos no cache.
 		s.cache.Set(&cache.Item{
 			Key:        cacheKey,
 			Object:     response[i:f],
@@ -214,7 +263,7 @@ func (s *HandlerFactory) toBytes(cacheKey string, response []*SimilaresResponse,
 
 func limitesDaPagina(size int, pagina int) (int, int) {
 	i := (pagina - 1) * TAM_PAGINA
-	return i, int(math.Min(float64(i+TAM_PAGINA), float64(size)))
+	return i, int(math.Max(0, math.Min(float64(i+TAM_PAGINA), float64(size))))
 }
 
 func paginaRequisitada(r *http.Request) (int, error) {

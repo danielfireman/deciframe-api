@@ -1,19 +1,20 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"fmt"
 	"net/url"
-	"gopkg.in/redis.v4"
-	"encoding/json"
+	"os"
 
+	"gopkg.in/go-redis/cache.v4"
+	"gopkg.in/redis.v4"
+
+	"github.com/danielfireman/deciframe-api/db"
+	"github.com/danielfireman/deciframe-api/similares"
 	"github.com/julienschmidt/httprouter"
 	"github.com/newrelic/go-agent"
-	"github.com/danielfireman/deciframe-api/similares"
-	"github.com/danielfireman/deciframe-api/db"
-	"gopkg.in/go-redis/cache.v4"
 )
 
 func main() {
@@ -23,7 +24,7 @@ func main() {
 	}
 	log.Println("Porta utilizada", port)
 
-	mgoDB,err := db.New(os.Getenv("MONGODB_URI"))
+	mgoDB, err := db.Mongo(os.Getenv("MONGODB_URI"))
 	if err != nil {
 		log.Fatalf("Error connecting to DB: %q", err)
 	}
